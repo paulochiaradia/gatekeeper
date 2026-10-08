@@ -15,7 +15,7 @@ import (
 )
 
 func main() {
-	fmt.Println("=== Iniciando Gatekeeper Zero Trust ===")
+	fmt.Println("=== Iniciando Gatekeeper Zero Trust  teste ===")
 
 	cfg := config.GetConfig()
 
