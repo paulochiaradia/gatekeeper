@@ -1,7 +1,9 @@
 package ports
 
+import "context"
+
 // AccessUseCase define o contrato para a regra de negócio de acesso.
 // Qualquer serviço que implemente ProcessAccessRequest pode ser plugado ao MQTT.
 type AccessUseCase interface {
-	ProcessAccessRequest(uid string) (bool, error)
+	ProcessAccessRequest(ctx context.Context, uid string) (bool, error)
 }

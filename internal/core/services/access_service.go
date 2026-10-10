@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 
 	"log"
@@ -25,34 +26,49 @@ func NewAccessService(ur ports.UserRepository, lr ports.AccessLogRepository) *Ac
 }
 
 // ProcessAccessRequest valida o crachá e registra a tentativa no banco
-func (s *AccessService) ProcessAccessRequest(uid string) (bool, error) {
+func (s *AccessService) ProcessAccessRequest(ctx context.Context, uid string) (bool, error) {
 	// 1. Busca o usuário pelo UID do cartão
-	user, err := s.userRepo.GetUserByUID(uid)
+	user, err := s.userRepo.GetUserByUID(ctx, uid)
 
-	accessLog := &domain.AccessLog{
-		UserUID:   uid,
-		Timestamp: time.Now(),
+	if err != nil {
+		if errors.Is(err, errors.New("usuário não encontrado")) {
+			// Registra a tentativa de acesso com status "falha"
+			accessLog := &domain.AccessLog{
+				UserUID:   uid,
+				Timestamp: time.Now(),
+				Status:    "DENIED_NOT_FOUND",
+			}
+			_ = s.logRepo.SaveLog(ctx, accessLog)
+			log.Printf("[AUDIT] Acesso negado: UID %s não encontrado.", uid)
+			return false, errors.New("acesso negado")
+		}
+		return false, err
 	}
 
 	// 2. Regra: Usuário não existe
-	if err != nil {
-		accessLog.Status = "DENIED_NOT_FOUND"
-		_ = s.logRepo.SaveLog(accessLog) // O underline ignora o erro do log para não travar a execução
-		log.Printf("[AUDIT] Acesso negado: UID %s não encontrado.", uid)
-		return false, errors.New("acesso negado")
+	if user == nil {
+		return false, errors.New("usuário não encontrado")
 	}
 
 	// 3. Regra: Usuário existe, mas está inativo/bloqueado
 	if !user.IsActive {
-		accessLog.Status = "DENIED_INACTIVE"
-		_ = s.logRepo.SaveLog(accessLog)
+		accessLog := &domain.AccessLog{
+			UserUID:   uid,
+			Timestamp: time.Now(),
+			Status:    "DENIED_INACTIVE",
+		}
+		_ = s.logRepo.SaveLog(ctx, accessLog)
 		log.Printf("[AUDIT] Acesso negado: Usuário %s (%s) inativo.", user.Name, uid)
 		return false, errors.New("usuário inativo")
 	}
 
 	// 4. Regra: Sucesso
-	accessLog.Status = "GRANTED"
-	_ = s.logRepo.SaveLog(accessLog)
+	accessLog := &domain.AccessLog{
+		UserUID:   uid,
+		Timestamp: time.Now(),
+		Status:    "GRANTED",
+	}
+	_ = s.logRepo.SaveLog(ctx, accessLog)
 	log.Printf("[AUDIT] Acesso concedido: Bem-vindo, %s.", user.Name)
 
 	return true, nil

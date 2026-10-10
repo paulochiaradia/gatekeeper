@@ -1,7 +1,9 @@
 package broker
 
 import (
+	"context"
 	"log"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/paulochiaradia/gatekeeper/internal/core/ports"
@@ -86,12 +88,14 @@ func (m *MQTTAdapter) handshakeHandler(client mqtt.Client, msg mqtt.Message) {
 
 // doorRequestHandler é o nosso handler antigo (apenas renomeado para ficar claro)
 func (m *MQTTAdapter) doorRequestHandler(client mqtt.Client, msg mqtt.Message) {
-	// Fase 2 atual: Recebe UID puro.
-	// Na Fase 3: Aqui nós vamos descriptografar o payload usando o AES-GCM e o sharedSecret
 	payload := string(msg.Payload())
 	log.Printf("[MQTT EVENT] Pedido de porta -> Payload: %s", payload)
 
-	granted, err := m.usecase.ProcessAccessRequest(payload)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel() // Libera os recursos da memória ao sair da função
+
+	// Passamos o escudo protetor (ctx) para a regra de negócio
+	granted, err := m.usecase.ProcessAccessRequest(ctx, payload)
 
 	responseTopic := "security/door/response"
 	var responseMsg string
