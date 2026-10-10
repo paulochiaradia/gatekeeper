@@ -5,16 +5,18 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/paulochiaradia/gatekeeper/internal/core/ports"
+	"github.com/paulochiaradia/gatekeeper/internal/core/security"
 )
 
-// MQTTAdapter traduz as mensagens da rede para os casos de uso de negócio
+// MQTTAdapter é o adaptador que conecta o nosso Servidor Go ao Broker MQTT (Mosquitto)
 type MQTTAdapter struct {
 	client  mqtt.Client
 	usecase ports.AccessUseCase
+	crypto  *security.ECDHManager
 }
 
-// NewMQTTAdapter configura e inicializa a conexão com o broker Mosquitto
-func NewMQTTAdapter(brokerURI, clientID, username, password string, uc ports.AccessUseCase) (*MQTTAdapter, error) {
+// NewMQTTAdapter cria uma nova instância do adaptador MQTT
+func NewMQTTAdapter(brokerURI, clientID, username, password string, uc ports.AccessUseCase, crypto *security.ECDHManager) (*MQTTAdapter, error) {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerURI)
 	opts.SetClientID(clientID)
@@ -34,48 +36,75 @@ func NewMQTTAdapter(brokerURI, clientID, username, password string, uc ports.Acc
 	return &MQTTAdapter{
 		client:  client,
 		usecase: uc,
+		crypto:  crypto, // Guardamos a referência
 	}, nil
 }
 
-// StartListening assina o tópico e define a função de callback
-func (m *MQTTAdapter) StartListening(requestTopic string) error {
-	token := m.client.Subscribe(requestTopic, 1, m.messageHandler)
-	token.Wait()
-
-	if token.Error() != nil {
-		return token.Error()
+// StartListening agora assina DOIS tópicos
+func (m *MQTTAdapter) StartListening(requestTopic, handshakeTopic string) error {
+	// Assina o tópico de requisição de acesso (Porta)
+	token1 := m.client.Subscribe(requestTopic, 1, m.doorRequestHandler)
+	token1.Wait()
+	if token1.Error() != nil {
+		return token1.Error()
 	}
 
-	log.Printf("[MQTT] Inscrito com sucesso no tópico: %s", requestTopic)
+	// Assina o tópico de troca de chaves (Handshake)
+	token2 := m.client.Subscribe(handshakeTopic, 1, m.handshakeHandler)
+	token2.Wait()
+	if token2.Error() != nil {
+		return token2.Error()
+	}
+
+	log.Printf("[MQTT] Inscrito nos tópicos:\n -> %s\n -> %s", requestTopic, handshakeTopic)
 	return nil
 }
 
-// messageHandler é acionado de forma assíncrona sempre que o ESP32 manda mensagem
-func (m *MQTTAdapter) messageHandler(client mqtt.Client, msg mqtt.Message) {
-	payload := string(msg.Payload())
-	log.Printf("[MQTT EVENT] Mensagem recebida -> Tópico: %s | Payload: %s", msg.Topic(), payload)
+// handshakeHandler processa a chave pública do ESP32 e devolve a do Servidor
+func (m *MQTTAdapter) handshakeHandler(client mqtt.Client, msg mqtt.Message) {
+	esp32PubKeyBase64 := string(msg.Payload())
+	log.Printf("[SECURITY] Pedido de Handshake recebido. Chave do ESP32: %s...", esp32PubKeyBase64[:10])
 
-	// Repassa para a regra de negócio
+	// Tenta calcular o Segredo Compartilhado
+	sharedSecret, err := m.crypto.ComputeSharedSecret(esp32PubKeyBase64)
+	if err != nil {
+		log.Printf("[SECURITY ERROR] Falha ao processar chave do ESP32: %v", err)
+		return
+	}
+
+	// SUCESSO! Na Fase 3 nós usaremos esse segredo para inicializar o AES-GCM
+	log.Printf("[SECURITY SUCCESS] Segredo Compartilhado (Shared Secret) gerado com sucesso! Tamanho: %d bytes.", len(sharedSecret))
+
+	// Responde com a Chave Pública do Servidor Go
+	responseTopic := "security/handshake/response"
+	serverPubKey := m.crypto.GetPublicKeyBase64()
+
+	token := client.Publish(responseTopic, 1, false, serverPubKey)
+	token.Wait()
+	log.Printf("[SECURITY] Chave Pública do Servidor enviada de volta ao ESP32.")
+}
+
+// doorRequestHandler é o nosso handler antigo (apenas renomeado para ficar claro)
+func (m *MQTTAdapter) doorRequestHandler(client mqtt.Client, msg mqtt.Message) {
+	// Fase 2 atual: Recebe UID puro.
+	// Na Fase 3: Aqui nós vamos descriptografar o payload usando o AES-GCM e o sharedSecret
+	payload := string(msg.Payload())
+	log.Printf("[MQTT EVENT] Pedido de porta -> Payload: %s", payload)
+
 	granted, err := m.usecase.ProcessAccessRequest(payload)
 
-	// Prepara a resposta (Publish) de volta para o ESP32
 	responseTopic := "security/door/response"
 	var responseMsg string
 
 	if err != nil || !granted {
-		log.Printf("[MQTT ADAPTER] Enviando comando DENIED")
 		responseMsg = "DENIED"
 	} else {
-		log.Printf("[MQTT ADAPTER] Enviando comando GRANTED")
 		responseMsg = "GRANTED"
 	}
 
-	// Publica a resposta de volta (QoS 1)
-	token := client.Publish(responseTopic, 1, false, responseMsg)
-	token.Wait()
+	client.Publish(responseTopic, 1, false, responseMsg).Wait()
 }
 
-// Disconnect desliga o adaptador graciosamente
 func (m *MQTTAdapter) Disconnect() {
 	m.client.Disconnect(250)
 	log.Println("[MQTT] Desconectado do broker.")
