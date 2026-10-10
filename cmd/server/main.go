@@ -10,14 +10,21 @@ import (
 	"github.com/paulochiaradia/gatekeeper/internal/adapters/broker"
 	"github.com/paulochiaradia/gatekeeper/internal/adapters/repository"
 	"github.com/paulochiaradia/gatekeeper/internal/config"
+	"github.com/paulochiaradia/gatekeeper/internal/core/security"
 	"github.com/paulochiaradia/gatekeeper/internal/core/services"
 	"github.com/paulochiaradia/gatekeeper/internal/infrastructure/database"
 )
 
 func main() {
-	fmt.Println("=== Iniciando Gatekeeper Zero Trust  teste ===")
+	fmt.Println("=== Iniciando Gatekeeper Zero Trust  ===")
 
 	cfg := config.GetConfig()
+
+	cryptoManager, err := security.NewECDHManager()
+	if err != nil {
+		log.Fatalf("Falha crítica ao gerar chaves ECDH: %v", err)
+	}
+	log.Printf("[SECURITY] Chave Pública do Servidor (Base64): %s", cryptoManager.GetPublicKeyBase64())
 
 	dbConnection, err := database.Connect()
 	if err != nil {
@@ -37,16 +44,17 @@ func main() {
 		cfg.MQTTUsername,
 		cfg.MQTTPassword,
 		accessService,
+		cryptoManager,
 	)
 	if err != nil {
 		log.Fatalf("Falha ao conectar no MQTT: %v", err)
 	}
 	defer mqttHandler.Disconnect()
 
-	// Inicia a escuta dos eventos do ESP32
-	err = mqttHandler.StartListening("security/door/request")
+	// 6. Inicia a escuta dos dois tópicos
+	err = mqttHandler.StartListening("security/door/request", "security/handshake/request")
 	if err != nil {
-		log.Fatalf("Falha ao assinar tópico: %v", err)
+		log.Fatalf("Falha ao assinar tópicos: %v", err)
 	}
 
 	log.Println("Servidor online e integrado. Pressione Ctrl+C para encerrar.")
